@@ -44,7 +44,8 @@ def male_track_index_from_stem_strict(stem: str) -> tuple[int, str]:
 FPS = 30
 DATA_ROOT = Path("data/h5")
 PROJECT_DIR = Path("kpms_project")
-
+N_RANDOM_VIDEOS = 10          # cuantos .h5 usar
+RANDOM_SEED = 123             # para que sea reproducible
 
 # -----------------------------
 # SLEAP LOADER
@@ -106,6 +107,21 @@ def main():
     if not h5_files:
         raise FileNotFoundError(f"No encontré .h5 en {DATA_ROOT.resolve()}")
 
+    # --- SUBSAMPLE ALEATORIO DE VÍDEOS ---
+    rng = np.random.default_rng(RANDOM_SEED)
+    n_total = len(h5_files)
+
+    n_use = min(N_RANDOM_VIDEOS, n_total)
+    idx = rng.choice(n_total, size=n_use, replace=False)
+
+    # mantenemos una lista “bonita” y estable para logs
+    h5_files = [h5_files[i] for i in sorted(idx)]
+
+    print(f"\n[SUBSAMPLE] Usando {n_use}/{n_total} vídeos (.h5) aleatorios:")
+    for p in h5_files:
+        print("  -", p.name)
+    print()
+
     # cargar
     coordinates_dict = {}
     confidences_dict = {}
@@ -151,14 +167,14 @@ def main():
 
     # ---- VERIFICACIÓN FINAL AUTOMÁTICA ----
 
-    detected_track2 = set(male_track2_sessions) #donde se guardan los track 2 y lo convierte en set
-
-    if detected_track2 != MALE_TRACK2_IDS:
+    detected_track2 = set(male_track2_sessions)
+    # con subsampling: Track2 detectados deben ser SUBCONJUNTO de tu lista manual
+    if not detected_track2.issubset(MALE_TRACK2_IDS):
+        extras = sorted(detected_track2 - MALE_TRACK2_IDS)
         raise ValueError(
-            "\n ERROR: La detección automática de Track2 NO coincide "
-            "con tu lista manual.\n"
-            f"Detectado: {sorted(detected_track2)}\n"
-            f"Esperado:  {sorted(MALE_TRACK2_IDS)}"
+            "\n ERROR: Aparecieron sesiones marcadas como Track2 que NO están en MALE_TRACK2_IDS.\n"
+            f"Extras detectados: {extras}\n"
+            f"MALE_TRACK2_IDS:   {sorted(MALE_TRACK2_IDS)}"
         )
 
     print("\n=== RESUMEN FINAL ===")
