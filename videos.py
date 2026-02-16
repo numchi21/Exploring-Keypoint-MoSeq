@@ -21,28 +21,6 @@ video_suffix = "_original"   # cambiar a "_inferencia" si corresponde
 MODE = "random"              # "random" o "representative"
 
 # ======================================
-# DEFINICIÓN MACHO
-# ======================================
-
-MALE_TRACK2_IDS = {
-    "50_S2", "50_S3", "51_S2", "55_S3",
-    "85_S3", "86_S2", "92_S2", "92_S3", "128_S3"
-}
-
-
-def extract_session_id(stem: str):
-    m = re.fullmatch(r"(\d+_S[23])", stem)
-    if m is None:
-        raise ValueError(f"Nombre inválido: {stem}")
-    return m.group(1)
-
-
-def male_track_index(stem: str):
-    sid = extract_session_id(stem)
-    return (1 if sid in MALE_TRACK2_IDS else 0), sid
-
-
-# ======================================
 # CARGADOR SLEAP
 # ======================================
 
@@ -68,21 +46,6 @@ def load_sleap_h5(h5_path: Path):
     conf[np.isnan(tracks[:, :, 0, :]) | np.isnan(tracks[:, :, 1, :])] = 0.0
 
     return tracks, conf, bodyparts
-
-# ===============================================
-# ALEATORIO O REPRESENTATIVO (definir en MODE)
-# ===============================================
-#aleatorio
-num_to_plot = min(10, len(all_syllables))
-selected_syllables_random = random.sample(all_syllables, num_to_plot)
-
-print("Seleccion aleatoria (seed fija):", selected_syllables_random)
-
-#representativo
-most_common = counter.most_common(10)
-selected_syllables_representative = [s for s, _ in most_common]
-
-print("Selección representativa (top frecuencia):", selected_syllables_representative)
 
 # ======================================
 # MAIN
@@ -113,7 +76,20 @@ def main():
 
     print("Sílabas disponibles:", all_syllables)
     print("Frecuencias:", counter)
+    # -----------------------------------------------
+    # ALEATORIO O REPRESENTATIVO (definir en MODE)
+    # -----------------------------------------------
+    # aleatorio
+    num_to_plot = min(10, len(all_syllables))
+    selected_syllables_random = random.sample(all_syllables, num_to_plot)
 
+    print("Seleccion aleatoria (seed fija):", selected_syllables_random)
+
+    # representativo
+    most_common = counter.most_common(10)
+    selected_syllables_representative = [s for s, _ in most_common]
+
+    print("Selección representativa (top frecuencia):", selected_syllables_representative)
     # ----------------------------------
     # Reconstruir coordinates (solo macho)
     # ----------------------------------
@@ -121,7 +97,14 @@ def main():
 
     for rec in results.keys():
 
-        sid = rec.split("__")[0]
+        # Parseo ESTRICTO del nombre usado en entrenamiento
+        m = re.fullmatch(r"(\d+_S[23])__male_track([12])", rec)
+        if m is None:
+            raise ValueError(f"Nombre de recording inesperado en results: {rec}")
+
+        sid = m.group(1)
+        male_r = int(m.group(2)) - 1  # 0 o 1
+
         h5_path = h5_root / f"{sid}.h5"
 
         if not h5_path.exists():
@@ -129,7 +112,6 @@ def main():
             continue
 
         coords, _, _ = load_sleap_h5(h5_path)
-        male_r, _ = male_track_index(sid)
 
         coordinates[rec] = coords[:, :, :, male_r]
 
@@ -148,6 +130,7 @@ def main():
             continue
 
         video_paths[rec] = str(video_path)
+
     if MODE == "random":
         syllables_to_plot = selected_syllables_random
     elif MODE == "representative":
