@@ -288,7 +288,7 @@ def main():
         model_name=model_name,
         ar_only=False,
         start_iter=current_iter,
-        num_iters=current_iter + 500,
+        num_iters=current_iter + 200,
     )[0]
 
     # reindex + results

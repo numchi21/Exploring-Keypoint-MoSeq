@@ -32,7 +32,7 @@ def extract_session_id_strict(stem: str) -> str:
     m = re.fullmatch(r"(\d+_S[23])", stem)
     if m is None:
         raise ValueError(
-            f"\n❌ Nombre de archivo inválido: '{stem}'\n"
+            f"\n Nombre de archivo inválido: '{stem}'\n"
             "Se esperaba formato exacto: <numero>_S2 o <numero>_S3"
         )
     return m.group(1)
