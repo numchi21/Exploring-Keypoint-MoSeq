@@ -18,7 +18,8 @@ h5_root = Path("data_new/h5")
 videos_root = Path("data/videos")
 
 video_suffix = "_original"   # cambiar a "_inferencia" si corresponde
-MODE = "random"              # "random" o "representative"
+
+TARGET_SESSIONS = ["92_S3", "50_S2"]
 
 # ======================================
 # CARGADOR SLEAP
@@ -52,9 +53,6 @@ def load_sleap_h5(h5_path: Path):
 # ======================================
 
 def main():
-    SEED = 42
-    random.seed(SEED)
-    np.random.seed(SEED)
     # ----------------------------------
     # Cargar config
     # ----------------------------------
@@ -65,6 +63,22 @@ def main():
     # ----------------------------------
     results = kpms.load_results(str(project_dir), model_name)
 
+    # Filtrar results solo a sesiones deseadas
+    filtered_results = {}
+
+    for rec in results:
+        m = re.fullmatch(r"(\d+_S[23])__male_track([12])", rec)
+        if m is None:
+            continue
+        sid = m.group(1)
+
+        if sid in TARGET_SESSIONS:
+            filtered_results[rec] = results[rec]
+
+    if not filtered_results:
+        raise ValueError("Ninguna sesión encontrada en results.")
+
+    results = filtered_results
     # Extraer todas las sílabas y contar frecuencia global
     counter = Counter()
 
@@ -76,20 +90,7 @@ def main():
 
     print("Sílabas disponibles:", all_syllables)
     print("Frecuencias:", counter)
-    # -----------------------------------------------
-    # ALEATORIO O REPRESENTATIVO (definir en MODE)
-    # -----------------------------------------------
-    # aleatorio
-    num_to_plot = min(10, len(all_syllables))
-    selected_syllables_random = random.sample(all_syllables, num_to_plot)
 
-    print("Seleccion aleatoria (seed fija):", selected_syllables_random)
-
-    # representativo
-    most_common = counter.most_common(10)
-    selected_syllables_representative = [s for s, _ in most_common]
-
-    print("Selección representativa (top frecuencia):", selected_syllables_representative)
     # ----------------------------------
     # Reconstruir coordinates (solo macho)
     # ----------------------------------
@@ -115,31 +116,40 @@ def main():
 
         coordinates[rec] = coords[:, :, :, male_r]
 
+
+    results = {rec: results[rec] for rec in coordinates.keys()}
+    results.keys() == coordinates.keys()
+
     # ----------------------------------
     # Asignar rutas de vídeo
     # ----------------------------------
     video_paths = {}
+    valid_recs = []
 
-    for rec in coordinates.keys():
+    for rec in list(coordinates.keys()):  # list() para evitar problemas
 
         sid = rec.split("__")[0]
         video_path = videos_root / f"{sid}{video_suffix}.mp4"
 
-        if not video_path.exists():
+        if video_path.exists():
+            video_paths[rec] = str(video_path)
+            valid_recs.append(rec)
+        else:
             print(f"[WARNING] Video no encontrado: {video_path}")
-            continue
 
-        video_paths[rec] = str(video_path)
+    # Mantener solo recordings válidos
+    coordinates = {rec: coordinates[rec] for rec in valid_recs}
+    results = {rec: results[rec] for rec in valid_recs}
 
-    if MODE == "random":
-        syllables_to_plot = selected_syllables_random
-    elif MODE == "representative":
-        syllables_to_plot = selected_syllables_representative
-    else:
-        raise ValueError("MODE debe ser 'random' o 'representative'")
     # ----------------------------------
     # Generar Grid Movies
     # ----------------------------------
+    # Mantener solo recs con coordenadas válidas
+    results = {rec: results[rec] for rec in coordinates.keys()}
+
+    # Mostrar todas las sílabas
+    syllables_to_plot = None
+
     kpms.generate_grid_movies(
         results,
         str(project_dir),
