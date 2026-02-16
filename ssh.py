@@ -212,7 +212,6 @@ if __name__ == "__main__":
         m = re.fullmatch(r"(\d+_S[23])__male_track([12])", rec)
         if m is None:
             continue
-
         sid = m.group(1)
 
         if sid in TARGET_SESSIONS:
