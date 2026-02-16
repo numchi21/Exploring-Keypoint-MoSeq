@@ -203,3 +203,22 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    TARGET_SESSIONS = ["92_S3", "50_S2"]
+    # Filtrar results solo a sesiones deseadas
+    filtered_results = {}
+
+    for rec in results:
+        m = re.fullmatch(r"(\d+_S[23])__male_track([12])", rec)
+        if m is None:
+            continue
+
+        sid = m.group(1)
+
+        if sid in TARGET_SESSIONS:
+            filtered_results[rec] = results[rec]
+
+    if not filtered_results:
+        raise ValueError("Ninguna sesión encontrada en results.")
+
+    results = filtered_results
