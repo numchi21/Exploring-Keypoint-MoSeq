@@ -3,7 +3,6 @@ import re
 import numpy as np
 import h5py
 import keypoint_moseq as kpms
-import random
 from collections import Counter
 
 
@@ -12,14 +11,13 @@ from collections import Counter
 # ======================================
 
 project_dir = Path("kpms_project")
-model_name = "TU_MODELO_AQUI"
+model_name = "2026_02_13-16_05_06"
 
-h5_root = Path("data_new/h5")
 videos_root = Path("data/videos")
 
-video_suffix = "_original"   # cambiar a "_inferencia" si corresponde
+video_suffix = "_inferencia"   # cambiar a "_inferencia" si corresponde
 
-TARGET_SESSIONS = ["92_S3", "50_S2"]
+TARGET_SESSIONS = ["128_S2", "129_S2", "51_S2", "54_S2", "81_S2", "86_S2", "92_S2", "55_S3", "85_S3", "92_S3"]
 
 # ======================================
 # CARGADOR SLEAP
@@ -91,9 +89,18 @@ def main():
     print("Sílabas disponibles:", all_syllables)
     print("Frecuencias:", counter)
 
+    # CÓDIGO CORREGIDO:
+
+    def get_h5_path(sid: str) -> Path:
+        for subdir in ["S2", "S3"]:
+            path = Path(f"data/h5/{subdir}/{sid}.h5")
+            if path.exists():
+                return path
+        return None  # Si no existe en ningún lado
+
     # ----------------------------------
     # Reconstruir coordinates (solo macho)
-    # ----------------------------------
+    # ---------------------------------
     coordinates = {}
 
     for rec in results.keys():
@@ -106,10 +113,10 @@ def main():
         sid = m.group(1)
         male_r = int(m.group(2)) - 1  # 0 o 1
 
-        h5_path = h5_root / f"{sid}.h5"
+        h5_path = get_h5_path(sid)
 
-        if not h5_path.exists():
-            print(f"[WARNING] No encuentro {h5_path}")
+        if h5_path is None or not h5_path.exists():
+            print(f"[WARNING] No encuentro h5 para {sid}")
             continue
 
         coords, _, _ = load_sleap_h5(h5_path)
@@ -147,20 +154,16 @@ def main():
     # Mantener solo recs con coordenadas válidas
     results = {rec: results[rec] for rec in coordinates.keys()}
 
-    # Mostrar todas las sílabas
-    syllables_to_plot = None
-
     kpms.generate_grid_movies(
         results,
         str(project_dir),
         model_name,
         coordinates=coordinates,
         video_paths=video_paths,
-        syllables_to_plot=syllables_to_plot,
+        fps=30,
+        syllables_to_plot=all_syllables[:10],
         overlay_syllable=True,  # muestra el estado
-        overlay_trajectory=True,  # 👈 ESTA ES LA CLAVE
-        trajectory_length=30,  # nº de frames hacia atrás (ajustable) probar primero sin, si funciona añadir
-        **cfg
+        overlay_trajectory=True,  # ESTA ES LA CLAVE
     )
 
     # ----------------------------------

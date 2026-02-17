@@ -1,5 +1,5 @@
 from jax import config as jax_config
-jax_config.update("jax_enable_x64", False)
+jax_config.update("jax_enable_x64", False) # float32 puede inducir drift numérico sutil (depende del dataset)
 
 import numpy as np
 import h5py
@@ -22,7 +22,7 @@ def extract_session_id_strict(stem: str) -> str:
     m = re.fullmatch(r"(\d+_S[23])", stem)
     if m is None:
         raise ValueError(
-            f"\n❌ Nombre de archivo inválido: '{stem}'\n"
+            f"\n Nombre de archivo inválido: '{stem}'\n"
             "Se esperaba formato exacto: <numero>_S2 o <numero>_S3"
         )
 
