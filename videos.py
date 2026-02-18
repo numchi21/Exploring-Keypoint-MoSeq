@@ -60,6 +60,7 @@ def load_sleap_h5(h5_path: Path):
 
     return tracks, conf, bodyparts
 
+
 # ======================================
 # MAIN
 # ======================================
