@@ -57,10 +57,10 @@ TRACKING_SCORE_THRESHOLD = 0.50  # ajustable
 RUN_SWAP_QA = True
 
 # ---- Normalización de escala ----
-NORMALIZE_COORDS = True
+NORMALIZE_COORDS = False
 NORM_QUANTILE = 0.90  # robusto
 # Si queremos normalizar por una longitud anatómica.
-NORMALIZE_BY_BONE = False
+NORMALIZE_BY_BONE = True
 BONE_A = "base_head"
 BONE_B = "base_body"
 
@@ -71,7 +71,7 @@ POSTERIOR_BPS = ["base_body", "base_tail"]
 
 # ---- Fitting ----
 NUM_AR_ITERS = 50
-NUM_FULL_ITERS = 500  # recomendado para convergencia más fiable
+NUM_FULL_ITERS = 50
 
 # Multi-seed para estabilidad, podemos probar
 RUN_MULTI_SEED = False
@@ -513,7 +513,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     anterior_bodyparts = [bp for bp in ANTERIOR_BPS if bp in bodyparts]
     posterior_bodyparts = [bp for bp in POSTERIOR_BPS if bp in bodyparts]
 
-    # checks duros
+    # checks
     bp_set = set(bodyparts)
     for a, b in skeleton:
         if a not in bp_set or b not in bp_set:
@@ -569,7 +569,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     # PCA + init (no lo hacíamos antes)
     # =============================
     pca = kpms.fit_pca(data["Y"], data["mask"], **cfg)
-    # recomendado: guardar PCA para reproducibilidad
+
     try:
         kpms.save_pca(pca, str(PROJECT_DIR))
     except Exception:
@@ -617,6 +617,9 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
 
     results = kpms.extract_results(model, metadata, str(PROJECT_DIR), model_name)
     kpms.save_results_as_csv(results, str(PROJECT_DIR), model_name)
+
+    results = kpms.load_results(str(PROJECT_DIR), model_name)
+    kpms.generate_trajectory_plots(coordinates, results, str(PROJECT_DIR), model_name, **cfg)
 
     print("DONE:", (PROJECT_DIR / model_name).resolve())
     return model_name
