@@ -26,8 +26,12 @@ TARGET_SESSIONS = ["128_S2", "129_S2", "51_S2", "54_S2", "81_S2", "86_S2", "92_S
 def load_sleap_h5(h5_path: Path):
     with h5py.File(h5_path, "r") as f:
         tracks = np.array(f["/tracks"], dtype=np.float32)      # (R,2,K,T)
-        occ = np.array(f["/track_occupancy"], dtype=np.uint8)
+        occ = np.array(f["/track_occupancy"], dtype=np.uint8)  # (T,R)
         node_names = f["/node_names"][...]
+
+        point_scores = None
+        if "/point_scores" in f:
+            point_scores = np.array(f["/point_scores"], dtype=np.float32)  # (R,K,T)
 
     bodyparts = [
         x.decode("utf-8") if isinstance(x, (bytes, np.bytes_)) else str(x)
@@ -37,12 +41,22 @@ def load_sleap_h5(h5_path: Path):
     R, D, K, T = tracks.shape
     tracks = np.transpose(tracks, (3, 2, 1, 0))  # (T,K,2,R)
 
+    # conf real si existe
+    if point_scores is not None:
+        conf = np.transpose(point_scores, (2, 1, 0))  # (T,K,R)
+    else:
+        conf = np.ones((T, K, R), dtype=np.float32)
+
+    # occupancy -> NaNs y conf=0
     for r in range(R):
         missing = occ[:, r] == 0
-        tracks[missing, :, :, r] = np.nan
+        if np.any(missing):
+            tracks[missing, :, :, r] = np.nan
+            conf[missing, :, r] = 0.0
 
-    conf = np.ones((T, K, R), dtype=np.float32)
-    conf[np.isnan(tracks[:, :, 0, :]) | np.isnan(tracks[:, :, 1, :])] = 0.0
+    # cualquier NaN => conf=0
+    invalid = np.isnan(tracks[:, :, 0, :]) | np.isnan(tracks[:, :, 1, :])
+    conf[invalid] = 0.0
 
     return tracks, conf, bodyparts
 
