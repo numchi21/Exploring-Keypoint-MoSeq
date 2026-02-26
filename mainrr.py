@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from jax import config as jax_config
-jax_config.update("jax_enable_x64", True) #cambiado a true
+jax_config.update("jax_enable_x64", True)
 
 import numpy as np
 import h5py
@@ -51,21 +51,19 @@ RANDOM_SEED = 123
 
 # Enmascara frames donde tracking_score es bajo (si existe)
 USE_TRACKING_SCORE_MASK = True
-TRACKING_SCORE_THRESHOLD = 0.50  # ajustable
+TRACKING_SCORE_THRESHOLD = 0.50
 
 # Métricas QA anti-swaps (no enmascara; solo reporta)
 RUN_SWAP_QA = True
 
 # ---- Normalización de escala ----
-NORMALIZE_COORDS = False
-NORM_QUANTILE = 0.90  # robusto
-# Si queremos normalizar por una longitud anatómica.
-NORMALIZE_BY_BONE = True
+NORMALIZE_COORDS = True           # <-- activado
+NORMALIZE_BY_BONE = True          # ahora con longitud anatómica
 BONE_A = "base_head"
 BONE_B = "base_body"
 
 # ---- Bodyparts ----
-EXCLUDE_TAIL = True  # recomendación de keypoint moseq
+EXCLUDE_TAIL = True
 ANTERIOR_BPS = ["nose", "upper_head"]
 POSTERIOR_BPS = ["base_body", "base_tail"]
 
@@ -73,7 +71,7 @@ POSTERIOR_BPS = ["base_body", "base_tail"]
 NUM_AR_ITERS = 50
 NUM_FULL_ITERS = 50
 
-# Multi-seed para estabilidad, podemos probar
+# Multi-seed para estabilidad
 RUN_MULTI_SEED = False
 MODEL_SEEDS = [0, 1, 2]
 
@@ -115,8 +113,8 @@ class SleapLoaded:
     tracks_TK2R: np.ndarray         # (T,K,2,R)
     conf_TKR: np.ndarray            # (T,K,R)  (point_scores)
     bodyparts: List[str]
-    skeleton_edges: Optional[List[List[str]]]  # [[bp1,bp2], ...] si está disponible
-    tracking_scores_RT: Optional[np.ndarray]   # (R,T) si está disponible
+    skeleton_edges: Optional[List[List[str]]]
+    tracking_scores_RT: Optional[np.ndarray]   # (R,T)
 
 def load_sleap_h5(h5_path: Path) -> SleapLoaded:
     with h5py.File(h5_path, "r") as f:
@@ -135,7 +133,6 @@ def load_sleap_h5(h5_path: Path) -> SleapLoaded:
         skeleton_edges = None
         if "/edge_names" in f:
             edge_names = f["/edge_names"][...]
-            # edge_names puede venir como bytes
             sk = []
             for a, b in edge_names:
                 aa = a.decode("utf-8") if isinstance(a, (bytes, np.bytes_)) else str(a)
@@ -143,7 +140,6 @@ def load_sleap_h5(h5_path: Path) -> SleapLoaded:
                 sk.append([aa, bb])
             skeleton_edges = sk
 
-    # decode node_names
     bodyparts = []
     for x in np.array(node_names):
         if isinstance(x, (bytes, np.bytes_)):
@@ -154,7 +150,6 @@ def load_sleap_h5(h5_path: Path) -> SleapLoaded:
             except Exception:
                 bodyparts.append(str(x))
 
-    # sanity
     if tracks.ndim != 4:
         raise ValueError(f"{h5_path}: tracks.ndim={tracks.ndim}, esperado 4")
     R, D, K, T = tracks.shape
@@ -165,26 +160,21 @@ def load_sleap_h5(h5_path: Path) -> SleapLoaded:
     if occ.shape != (T, R):
         raise ValueError(f"{h5_path}: occupancy shape {occ.shape} != (T,R)=({T},{R})")
 
-    # coords -> (T,K,2,R)
     tracks_TK2R = np.transpose(tracks, (3, 2, 1, 0))  # (T,K,2,R)
 
-    # confidences reales
     if point_scores is not None:
         if point_scores.shape != (R, K, T):
             raise ValueError(f"{h5_path}: point_scores {point_scores.shape} esperado (R,K,T)=({R},{K},{T})")
         conf_TKR = np.transpose(point_scores, (2, 1, 0))  # (T,K,R)
     else:
-        # fallback binario (no recomendado, pero estable)
         conf_TKR = np.ones((T, K, R), dtype=np.float32)
 
-    # occupancy mask -> NaN coords y conf=0
     for r in range(R):
         missing = (occ[:, r] == 0)
         if np.any(missing):
             tracks_TK2R[missing, :, :, r] = np.nan
             conf_TKR[missing, :, r] = 0.0
 
-    # cualquier NaN => conf=0
     invalid = np.isnan(tracks_TK2R[:, :, 0, :]) | np.isnan(tracks_TK2R[:, :, 1, :])
     conf_TKR[invalid] = 0.0
 
@@ -201,29 +191,20 @@ def load_sleap_h5(h5_path: Path) -> SleapLoaded:
 # QA ANTI-SWAPS
 # =============================
 def swap_qa_report(tracks_TK2R: np.ndarray) -> Dict[str, float]:
-    """
-    Reporta métricas simples:
-    - velocidad del centroide por track
-    - jumps extremos (umbral basado en MAD)
-    - cruces frecuentes (distancia inter-track baja + cambio relativo)
-    """
     T, K, _, R = tracks_TK2R.shape
-    # centroid aproximado: media de keypoints válidos
     cent = np.full((T, 2, R), np.nan, dtype=np.float32)
     for r in range(R):
         xy = tracks_TK2R[:, :, :, r]  # (T,K,2)
-        valid = np.isfinite(xy).all(axis=2)  # (T,K)
-        # media por frame
+        valid = np.isfinite(xy).all(axis=2)
         for t in range(T):
             v = valid[t]
             if np.any(v):
                 cent[t, :, r] = np.nanmean(xy[t, v, :], axis=0)
 
     report = {}
-    # speed y jumps por track
     for r in range(R):
         c = cent[:, :, r]
-        dc = np.linalg.norm(np.diff(c, axis=0), axis=1)  # (T-1,)
+        dc = np.linalg.norm(np.diff(c, axis=0), axis=1)
         mad = robust_mad(dc)
         med = np.nanmedian(dc)
         thr = med + 10.0 * mad
@@ -232,9 +213,8 @@ def swap_qa_report(tracks_TK2R: np.ndarray) -> Dict[str, float]:
         report[f"track{r+1}_speed_mad"] = float(mad)
         report[f"track{r+1}_jumps_10MAD"] = float(jumps)
 
-    # distancia entre tracks (si R>=2)
     if R >= 2:
-        d12 = np.linalg.norm(cent[:, :, 0] - cent[:, :, 1], axis=1)  # (T,)
+        d12 = np.linalg.norm(cent[:, :, 0] - cent[:, :, 1], axis=1)
         report["intertrack_dist_median"] = float(np.nanmedian(d12))
         report["intertrack_dist_p05"] = float(np.nanquantile(d12[np.isfinite(d12)], 0.05)) if np.any(np.isfinite(d12)) else float("nan")
 
@@ -244,59 +224,78 @@ def swap_qa_report(tracks_TK2R: np.ndarray) -> Dict[str, float]:
 # =============================
 # NORMALIZACIÓN DE ESCALA
 # =============================
-def normalize_coordinates_global(coordinates_dict: Dict[str, np.ndarray]) -> Tuple[Dict[str, np.ndarray], float]:
+def normalize_by_bone_length(
+    coordinates_dict: Dict[str, np.ndarray],
+    bodyparts: List[str],
+    a: str,
+    b: str
+) -> Tuple[Dict[str, np.ndarray], float]:
     """
-    coordinates_dict[rec] = (T,K,2)
-    Normaliza por escala robusta global basada en cuantiles de distancia al centro.
+    For each recording independently:
+      1. Computes the per-frame centroid from valid keypoints.
+      2. Subtracts the centroid so the animal is centered at the origin.
+      3. Divides by the median bone length (a→b) computed across all recordings,
+         so scale is consistent across sessions.
+
+    This means kpms.format_data will receive already-centered coordinates,
+    and the subsequent egocentric alignment (heading rotation) will operate on
+    geometry that is both centered and scale-normalised.
     """
-    all_xy = []
-    for c in coordinates_dict.values():
-        xy = c.reshape(-1, 2)
-        xy = xy[np.isfinite(xy).all(axis=1)]
-        if xy.size:
-            all_xy.append(xy)
-    if not all_xy:
-        return coordinates_dict, 1.0
-
-    all_xy = np.concatenate(all_xy, axis=0)
-    center = np.median(all_xy, axis=0)
-    dist = np.linalg.norm(all_xy - center, axis=1)
-    scale = float(np.quantile(dist, NORM_QUANTILE)) + 1e-12
-
-    out = {}
-    for k, c in coordinates_dict.items():
-        out[k] = c / scale
-    return out, scale
-
-def normalize_by_bone_length(coordinates_dict: Dict[str, np.ndarray], bodyparts: List[str], a: str, b: str) -> Tuple[Dict[str, np.ndarray], float]:
     if a not in bodyparts or b not in bodyparts:
-        raise ValueError(f"Para NORMALIZE_BY_BONE necesitas {a} y {b} en bodyparts.")
+        raise ValueError(
+            f"NORMALIZE_BY_BONE requires '{a}' and '{b}' in bodyparts.\n"
+            f"Available: {bodyparts}"
+        )
     ia, ib = bodyparts.index(a), bodyparts.index(b)
 
-    lengths = []
+    # ---- Step 1: compute global scale from all recordings ----
+    all_lengths: List[np.ndarray] = []
     for c in coordinates_dict.values():
-        pa = c[:, ia, :]  # (T,2)
-        pb = c[:, ib, :]
-        v = np.isfinite(pa).all(axis=1) & np.isfinite(pb).all(axis=1)
-        if np.any(v):
-            lengths.append(np.linalg.norm(pa[v] - pb[v], axis=1))
-    if not lengths:
-        return coordinates_dict, 1.0
+        pa = c[:, ia, :]   # (T, 2)
+        pb = c[:, ib, :]   # (T, 2)
+        valid = np.isfinite(pa).all(axis=1) & np.isfinite(pb).all(axis=1)
+        if np.any(valid):
+            all_lengths.append(np.linalg.norm(pa[valid] - pb[valid], axis=1))
 
-    lengths = np.concatenate(lengths)
-    scale = float(np.median(lengths)) + 1e-12
-    out = {k: c / scale for k, c in coordinates_dict.items()}
+    if not all_lengths:
+        raise ValueError(
+            f"Could not compute bone length for '{a}'→'{b}': "
+            "no valid frames found across all recordings."
+        )
+
+    scale = float(np.median(np.concatenate(all_lengths))) + 1e-12
+    print(f"[NORM] Global median bone length ({a}→{b}): {scale:.4f} px  →  dividing all coords by this value.")
+
+    # ---- Step 2: per-recording centering + scale normalisation ----
+    out: Dict[str, np.ndarray] = {}
+    for rec, c in coordinates_dict.items():
+        c = c.copy()                            # (T, K, 2)  – don't mutate original
+        T, K, _ = c.shape
+
+        # Per-frame centroid from valid keypoints only
+        centroid = np.full((T, 2), np.nan, dtype=c.dtype)
+        for t in range(T):
+            valid_kp = np.isfinite(c[t]).all(axis=1)  # (K,)
+            if np.any(valid_kp):
+                centroid[t] = np.nanmean(c[t, valid_kp, :], axis=0)
+
+        # Subtract centroid (broadcast over K)
+        c = c - centroid[:, np.newaxis, :]     # (T, K, 2) – NaN frames stay NaN
+
+        # Divide by global scale
+        c = c / scale
+
+        out[rec] = c
+
     return out, scale
+
 
 # =============================
 # SUBSAMPLING
 # =============================
 def subsample_files(h5_files: List[Path]) -> List[Path]:
-
     rng = np.random.default_rng(RANDOM_SEED)
-
     strata = {"S2": [], "S3": []}
-
     for p in h5_files:
         sid = extract_session_id_strict(p.stem)
         strata[sid.split("_")[1]].append(p)
@@ -306,20 +305,13 @@ def subsample_files(h5_files: List[Path]) -> List[Path]:
     n3 = n_use - n2
 
     out = []
-
     for key, n in [("S2", n2), ("S3", n3)]:
-
         pool = strata[key]
-
         if not pool:
             continue
-
         n = min(n, len(pool))
-
         idx = rng.choice(len(pool), size=n, replace=False)
-
         out.extend([pool[i] for i in idx])
-
     return sorted(out)
 
 
@@ -337,7 +329,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
 
     h5_files = subsample_files(h5_files)
 
-    # Guardar lista de archivos usada (punto 0)
     file_list = [str(p.resolve()) for p in h5_files]
     save_json(qa_dir / f"used_h5_files_{run_tag}.json", file_list)
 
@@ -354,7 +345,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
 
     male_track1_sessions = []
     male_track2_sessions = []
-
     per_recording_metrics = []
 
     for h5_path in h5_files:
@@ -363,11 +353,10 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
         conf_TKR = loaded.conf_TKR
         bodyparts = loaded.bodyparts
         sk_edges = loaded.skeleton_edges
-        tracking_scores = loaded.tracking_scores_RT  # (R,T) o None
+        tracking_scores = loaded.tracking_scores_RT
 
         T, K, _, R = coords_TK2R.shape
 
-        # Consistencia de bodyparts entre archivos
         if bodyparts_ref is None:
             bodyparts_ref = bodyparts
             skeleton_ref = sk_edges
@@ -380,21 +369,17 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
                     f"Archivo: {h5_path}"
                 )
 
-        # QA swaps (report)
         if RUN_SWAP_QA:
             rep = swap_qa_report(coords_TK2R)
         else:
             rep = {}
 
-        # --- SELECCIÓN MACHO ---
         male_r, sid = male_track_index_from_stem_strict(h5_path.stem)
         if not (0 <= male_r < R):
             raise ValueError(f"{h5_path.name}: male_r={male_r} fuera de rango para R={R}")
 
-        # Anti-swaps: enmascarar frames con tracking_score bajo (si existe)
         if USE_TRACKING_SCORE_MASK and tracking_scores is not None:
-            # tracking_scores: (R,T) -> queremos track male_r
-            ts = tracking_scores[male_r]  # (T,)
+            ts = tracking_scores[male_r]
             low = ts < TRACKING_SCORE_THRESHOLD
             if np.any(low):
                 coords_TK2R[low, :, :, male_r] = np.nan
@@ -411,16 +396,13 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
         coords_male = coords_TK2R[:, :, :, male_r]   # (T,K,2)
         conf_male = conf_TKR[:, :, male_r]           # (T,K)
 
-        # Métricas por recording (punto 0 + 2 + 8)
-        valid_xy = np.isfinite(coords_male).all(axis=2)  # (T,K)
+        valid_xy = np.isfinite(coords_male).all(axis=2)
         mask_frac = float(np.mean(valid_xy)) if valid_xy.size else 0.0
 
-        # rangos de coords (en px antes de normalizar)
         finite = coords_male[np.isfinite(coords_male)]
         coord_min = float(np.min(finite)) if finite.size else float("nan")
         coord_max = float(np.max(finite)) if finite.size else float("nan")
 
-        # validez de anterior/posterior
         anterior_ok = np.nan
         posterior_ok = np.nan
         if bodyparts_ref is not None:
@@ -452,7 +434,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
 
     save_csv(qa_dir / f"per_recording_metrics_{run_tag}.csv", per_recording_metrics)
 
-    # Verificación final de Track2 subset (con subsampling)
     detected_track2 = set(male_track2_sessions)
     if not detected_track2.issubset(MALE_TRACK2_IDS):
         extras = sorted(detected_track2 - MALE_TRACK2_IDS)
@@ -472,12 +453,22 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     # =============================
     norm_info = {"enabled": False}
     if NORMALIZE_COORDS:
-        if NORMALIZE_BY_BONE:
-            coordinates_dict, scale = normalize_by_bone_length(coordinates_dict, bodyparts_ref, BONE_A, BONE_B)
-            norm_info = {"enabled": True, "method": "bone_median", "bone": [BONE_A, BONE_B], "scale": scale}
-        else:
-            coordinates_dict, scale = normalize_coordinates_global(coordinates_dict)
-            norm_info = {"enabled": True, "method": "global_quantile", "quantile": NORM_QUANTILE, "scale": scale}
+        if not NORMALIZE_BY_BONE:
+            raise ValueError(
+                "NORMALIZE_COORDS=True but NORMALIZE_BY_BONE=False. "
+                "The global-quantile normalizer has been removed. "
+                "Please set NORMALIZE_BY_BONE=True."
+            )
+
+        coordinates_dict, scale = normalize_by_bone_length(
+            coordinates_dict, bodyparts_ref, BONE_A, BONE_B
+        )
+        norm_info = {
+            "enabled": True,
+            "method": "per_recording_centering_then_bone_median_scale",
+            "bone": [BONE_A, BONE_B],
+            "scale_px": scale,
+        }
         save_json(qa_dir / f"normalization_{run_tag}.json", norm_info)
         print(f"[NORM] Coordenadas normalizadas. Info: {norm_info}")
 
@@ -486,7 +477,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     # =============================
     bodyparts = bodyparts_ref
 
-    # Skeleton: usar el del h5 si existe; si no, fallback al tuyo
     skeleton = skeleton_ref if skeleton_ref is not None else [
         ["nose", "upper_head"],
         ["upper_head", "base_head"],
@@ -501,10 +491,8 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
         ["upper_body", "R_sh"],
     ]
 
-    # use_bodyparts: excluir cola si aplica
     if EXCLUDE_TAIL:
         use_bodyparts = [bp for bp in bodyparts if "tail" not in bp.lower()]
-        # opcional: mantener base_tail si quieres posterior estable
         if "base_tail" in bodyparts and "base_tail" not in use_bodyparts:
             use_bodyparts.append("base_tail")
     else:
@@ -513,7 +501,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     anterior_bodyparts = [bp for bp in ANTERIOR_BPS if bp in bodyparts]
     posterior_bodyparts = [bp for bp in POSTERIOR_BPS if bp in bodyparts]
 
-    # checks
     bp_set = set(bodyparts)
     for a, b in skeleton:
         if a not in bp_set or b not in bp_set:
@@ -522,7 +509,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
         if x not in bp_set:
             raise ValueError(f"Bodypart {x} not in bodyparts")
 
-    # setup project
     if not (PROJECT_DIR / "config.yml").exists():
         kpms.setup_project(str(PROJECT_DIR), overwrite=True)
 
@@ -550,7 +536,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     )
     data, metadata = kpms.format_data(coordinates, confidences, **cfg)
 
-    # Si quieres forzar precisión de data (tu patrón original)
     from jax_moseq.utils.debugging import convert_data_precision
     data = convert_data_precision(data)
 
@@ -566,7 +551,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     cfg = kpms.load_config(str(PROJECT_DIR))
 
     # =============================
-    # PCA + init (no lo hacíamos antes)
+    # PCA + init
     # =============================
     pca = kpms.fit_pca(data["Y"], data["mask"], **cfg)
 
@@ -577,10 +562,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
 
     model = kpms.init_model(data, pca=pca, **cfg)
 
-    # Si tu versión permite semilla explícita en init, úsala aquí.
-    # (No todas las versiones la exponen; por eso lo dejamos opcional.)
     if model_seed is not None:
-        # guardamos seed en QA para trazabilidad
         save_json(qa_dir / f"model_seed_{run_tag}.json", {"seed": model_seed})
 
     # =============================
@@ -598,7 +580,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
         str(PROJECT_DIR), model_name, iteration=NUM_AR_ITERS
     )
 
-    # kappa tuning (punto 9)
     kappa_use = float(kappa_full) if kappa_full is not None else 1e4
     model = kpms.update_hypparams(model, kappa=kappa_use)
     save_json(qa_dir / f"kappa_{run_tag}.json", {"kappa_full": kappa_use})
@@ -611,7 +592,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
         num_iters=current_iter + NUM_FULL_ITERS,
     )[0]
 
-    # reindex + results
     kpms.reindex_syllables_in_checkpoint(str(PROJECT_DIR), model_name)
     model, data, metadata, _ = kpms.load_checkpoint(str(PROJECT_DIR), model_name)
 
@@ -627,7 +607,6 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
 
 def main():
     run_tag = "default"
-
     main_one_run(
         run_tag=run_tag,
         model_seed=None,
