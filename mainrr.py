@@ -46,7 +46,7 @@ FPS = 30
 DATA_ROOT = Path("data/h5")
 PROJECT_DIR = Path("kpms_project")
 
-N_RANDOM_VIDEOS = 10
+N_RANDOM_VIDEOS = 26
 RANDOM_SEED = 123
 
 # Enmascara frames donde tracking_score es bajo (si existe)
@@ -69,7 +69,7 @@ POSTERIOR_BPS = ["base_body", "base_tail"]
 
 # ---- Fitting ----
 NUM_AR_ITERS = 50
-NUM_FULL_ITERS = 50
+NUM_FULL_ITERS = 500
 
 # Multi-seed para estabilidad
 RUN_MULTI_SEED = False
