@@ -10,6 +10,11 @@ import keypoint_moseq as kpms
 import re
 import json
 import csv
+import os
+import jax
+import matplotlib
+matplotlib.use("Agg")   # non-interactive backend — works on headless servers
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 
@@ -57,8 +62,8 @@ TRACKING_SCORE_THRESHOLD = 0.50
 RUN_SWAP_QA = True
 
 # ---- Normalización de escala ----
-NORMALIZE_COORDS = True           # <-- activado
-NORMALIZE_BY_BONE = True          # ahora con longitud anatómica
+NORMALIZE_COORDS = True
+NORMALIZE_BY_BONE = True
 BONE_A = "base_head"
 BONE_B = "base_body"
 
@@ -67,13 +72,27 @@ EXCLUDE_TAIL = True
 ANTERIOR_BPS = ["nose", "upper_head"]
 POSTERIOR_BPS = ["base_body", "base_tail"]
 
-# ---- Fitting ----
+# ---- Kappa scan ----
+KAPPA_SCAN_PREFIX = "kappa_scan"
+KAPPA_SCAN_VALUES = np.logspace(3, 7, 5)      # [1e3, ~3e4, 1e5, ~3e5, 1e7]
+KAPPA_DECREASE_FACTOR = 10
+NUM_AR_ITERS_SCAN = 50
+NUM_FULL_ITERS_SCAN = 200
+
+# ---- Multi-seed fitting ----
+MULTI_SEED_PREFIX = "multi_seed"
+NUM_MODEL_FITS = 20
+AR_ONLY_KAPPA = 1e6
+FULL_MODEL_KAPPA = 1e4
 NUM_AR_ITERS = 50
 NUM_FULL_ITERS = 500
 
-# Multi-seed para estabilidad
-RUN_MULTI_SEED = False
-MODEL_SEEDS = [0, 1, 2]
+# ---- Merging similar syllables ----
+# Edit this list to specify which syllables to merge before running.
+# Each inner list groups syllables that will be collapsed into one.
+# Leave empty ([]) to skip merging.
+SYLLABLES_TO_MERGE: List[List[int]] = []
+# Example: SYLLABLES_TO_MERGE = [[1, 3], [4, 5]]
 
 
 # =============================
@@ -230,17 +249,6 @@ def normalize_by_bone_length(
     a: str,
     b: str
 ) -> Tuple[Dict[str, np.ndarray], float]:
-    """
-    For each recording independently:
-      1. Computes the per-frame centroid from valid keypoints.
-      2. Subtracts the centroid so the animal is centered at the origin.
-      3. Divides by the median bone length (a→b) computed across all recordings,
-         so scale is consistent across sessions.
-
-    This means kpms.format_data will receive already-centered coordinates,
-    and the subsequent egocentric alignment (heading rotation) will operate on
-    geometry that is both centered and scale-normalised.
-    """
     if a not in bodyparts or b not in bodyparts:
         raise ValueError(
             f"NORMALIZE_BY_BONE requires '{a}' and '{b}' in bodyparts.\n"
@@ -248,11 +256,10 @@ def normalize_by_bone_length(
         )
     ia, ib = bodyparts.index(a), bodyparts.index(b)
 
-    # ---- Step 1: compute global scale from all recordings ----
     all_lengths: List[np.ndarray] = []
     for c in coordinates_dict.values():
-        pa = c[:, ia, :]   # (T, 2)
-        pb = c[:, ib, :]   # (T, 2)
+        pa = c[:, ia, :]
+        pb = c[:, ib, :]
         valid = np.isfinite(pa).all(axis=1) & np.isfinite(pb).all(axis=1)
         if np.any(valid):
             all_lengths.append(np.linalg.norm(pa[valid] - pb[valid], axis=1))
@@ -266,25 +273,17 @@ def normalize_by_bone_length(
     scale = float(np.median(np.concatenate(all_lengths))) + 1e-12
     print(f"[NORM] Global median bone length ({a}→{b}): {scale:.4f} px  →  dividing all coords by this value.")
 
-    # ---- Step 2: per-recording centering + scale normalisation ----
     out: Dict[str, np.ndarray] = {}
     for rec, c in coordinates_dict.items():
-        c = c.copy()                            # (T, K, 2)  – don't mutate original
+        c = c.copy()
         T, K, _ = c.shape
-
-        # Per-frame centroid from valid keypoints only
         centroid = np.full((T, 2), np.nan, dtype=c.dtype)
         for t in range(T):
-            valid_kp = np.isfinite(c[t]).all(axis=1)  # (K,)
+            valid_kp = np.isfinite(c[t]).all(axis=1)
             if np.any(valid_kp):
                 centroid[t] = np.nanmean(c[t, valid_kp, :], axis=0)
-
-        # Subtract centroid (broadcast over K)
-        c = c - centroid[:, np.newaxis, :]     # (T, K, 2) – NaN frames stay NaN
-
-        # Divide by global scale
+        c = c - centroid[:, np.newaxis, :]
         c = c / scale
-
         out[rec] = c
 
     return out, scale
@@ -316,21 +315,127 @@ def subsample_files(h5_files: List[Path]) -> List[Path]:
 
 
 # =============================
+# PCA VARIANCE PLOT + USER INPUT
+# =============================
+def plot_pca_variance_and_ask(pca, qa_dir: Path, max_components: int = 15) -> int:
+    """
+    Plots individual and cumulative explained variance from the fitted PCA,
+    saves the figure to qa_dir/pca_variance.png, and asks the user
+    interactively how many latent dimensions to use.
+    """
+    # Extract explained variance from sklearn-style or array-style PCA object
+    if hasattr(pca, "explained_variance_ratio_"):
+        evr = np.array(pca.explained_variance_ratio_)
+    elif hasattr(pca, "components_") and hasattr(pca, "singular_values_"):
+        # Reconstruct from singular values if ratio not stored
+        sv = np.array(pca.singular_values_)
+        evr = sv**2 / np.sum(sv**2)
+    else:
+        # Fallback: try common attribute names used by kpms / jax-moseq
+        for attr in ("variance_explained", "explained_variance", "pca_variance"):
+            if hasattr(pca, attr):
+                raw = np.array(getattr(pca, attr))
+                evr = raw / raw.sum() if raw.sum() > 1.0 else raw
+                break
+        else:
+            print(
+                "[PCA PLOT] Could not extract explained variance from PCA object. "
+                "Skipping plot — please enter the number of PCs manually."
+            )
+            return _ask_n_pcs(max_allowed=50)
+
+    n_show = min(max_components, len(evr))
+    evr_show = evr[:n_show]
+    cumvar = np.cumsum(evr_show)
+    components = np.arange(1, n_show + 1)
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    # Individual bars
+    ax.bar(components, evr_show, color="#5a9e5a", alpha=0.85,
+           label="Individual Explained Variance")
+
+    # Cumulative line
+    ax.plot(components, cumvar, color="red", marker="o", linewidth=2,
+            label="Cumulative Explained Variance")
+
+    # Percentage labels
+    for i, (ind, cum) in enumerate(zip(evr_show, cumvar)):
+        ax.annotate(f"{cum*100:.0f}%",
+                    xy=(components[i], cum),
+                    xytext=(0, 8), textcoords="offset points",
+                    ha="center", fontsize=8, color="red")
+        ax.annotate(f"{ind*100:.0f}%",
+                    xy=(components[i], ind / 2),
+                    ha="center", va="center", fontsize=7.5, color="white",
+                    fontweight="bold")
+
+    ax.set_xlabel("Principal Components", fontsize=11)
+    ax.set_ylabel("Explained Variance", fontsize=11)
+    ax.set_title("Explained Variance by Different Principal Components", fontsize=13)
+    ax.set_ylim(0, 1.08)
+    ax.set_xticks(components)
+    ax.legend(loc="center right", fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    plot_path = qa_dir / "pca_variance.png"
+    fig.savefig(str(plot_path), dpi=150)
+    plt.close(fig)
+    print(f"\n[PCA PLOT] Variance plot saved to: {plot_path.resolve()}")
+
+    # Try to open the image for the user (best-effort, non-blocking)
+    try:
+        import subprocess, sys
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(plot_path)])
+        elif sys.platform.startswith("linux"):
+            subprocess.Popen(["xdg-open", str(plot_path)])
+    except Exception:
+        pass
+
+    return _ask_n_pcs(max_allowed=n_show)
+
+
+def _ask_n_pcs(max_allowed: int) -> int:
+    """Blocks until the user enters a valid integer number of PCs."""
+    print("\n" + "="*55)
+    print("  PCA — SELECT NUMBER OF LATENT DIMENSIONS (PCs)")
+    print("="*55)
+    print(f"  Review the variance plot before answering.")
+    print(f"  Valid range: 1 – {max_allowed}")
+    print("="*55)
+    while True:
+        try:
+            raw = input("  >> Enter number of principal components to use: ").strip()
+            n = int(raw)
+            if 1 <= n <= max_allowed:
+                print(f"\n[PCA] Using {n} principal components.\n")
+                return n
+            else:
+                print(f"  [!] Please enter a value between 1 and {max_allowed}.")
+        except ValueError:
+            print("  [!] Invalid input — please enter a whole number.")
+
+
+# =============================
 # PIPELINE PRINCIPAL
 # =============================
-def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Optional[float] = None):
+def main():
     ensure_dir(PROJECT_DIR)
     qa_dir = PROJECT_DIR / "QA_AUDIT"
     ensure_dir(qa_dir)
 
+    # =============================
+    # 1) CARGA DE DATOS
+    # =============================
     h5_files = collect_h5_files(DATA_ROOT)
     if not h5_files:
         raise FileNotFoundError(f"No encontré .h5 en {DATA_ROOT.resolve()}")
 
     h5_files = subsample_files(h5_files)
 
-    file_list = [str(p.resolve()) for p in h5_files]
-    save_json(qa_dir / f"used_h5_files_{run_tag}.json", file_list)
+    save_json(qa_dir / "used_h5_files.json", [str(p.resolve()) for p in h5_files])
 
     print(f"\n[DATA] Usando {len(h5_files)} vídeos (.h5):")
     for p in h5_files:
@@ -369,10 +474,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
                     f"Archivo: {h5_path}"
                 )
 
-        if RUN_SWAP_QA:
-            rep = swap_qa_report(coords_TK2R)
-        else:
-            rep = {}
+        rep = swap_qa_report(coords_TK2R) if RUN_SWAP_QA else {}
 
         male_r, sid = male_track_index_from_stem_strict(h5_path.stem)
         if not (0 <= male_r < R):
@@ -393,12 +495,11 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
             male_track2_sessions.append(sid)
 
         rec = f"{sid}__male_track{male_r + 1}"
-        coords_male = coords_TK2R[:, :, :, male_r]   # (T,K,2)
-        conf_male = conf_TKR[:, :, male_r]           # (T,K)
+        coords_male = coords_TK2R[:, :, :, male_r]
+        conf_male = conf_TKR[:, :, male_r]
 
         valid_xy = np.isfinite(coords_male).all(axis=2)
         mask_frac = float(np.mean(valid_xy)) if valid_xy.size else 0.0
-
         finite = coords_male[np.isfinite(coords_male)]
         coord_min = float(np.min(finite)) if finite.size else float("nan")
         coord_max = float(np.max(finite)) if finite.size else float("nan")
@@ -432,7 +533,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
         confidences_dict[rec] = conf_male
         recording_names.append(rec)
 
-    save_csv(qa_dir / f"per_recording_metrics_{run_tag}.csv", per_recording_metrics)
+    save_csv(qa_dir / "per_recording_metrics.csv", per_recording_metrics)
 
     detected_track2 = set(male_track2_sessions)
     if not detected_track2.issubset(MALE_TRACK2_IDS):
@@ -451,15 +552,12 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     # =============================
     # 2) NORMALIZACIÓN
     # =============================
-    norm_info = {"enabled": False}
     if NORMALIZE_COORDS:
         if not NORMALIZE_BY_BONE:
             raise ValueError(
                 "NORMALIZE_COORDS=True but NORMALIZE_BY_BONE=False. "
-                "The global-quantile normalizer has been removed. "
                 "Please set NORMALIZE_BY_BONE=True."
             )
-
         coordinates_dict, scale = normalize_by_bone_length(
             coordinates_dict, bodyparts_ref, BONE_A, BONE_B
         )
@@ -469,11 +567,11 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
             "bone": [BONE_A, BONE_B],
             "scale_px": scale,
         }
-        save_json(qa_dir / f"normalization_{run_tag}.json", norm_info)
+        save_json(qa_dir / "normalization.json", norm_info)
         print(f"[NORM] Coordenadas normalizadas. Info: {norm_info}")
 
     # =============================
-    # 5) skeleton + checks duros
+    # 3) CONFIG + SKELETON
     # =============================
     bodyparts = bodyparts_ref
 
@@ -525,7 +623,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     cfg = kpms.load_config(str(PROJECT_DIR))
 
     # =============================
-    # Outlier removal + format
+    # 4) OUTLIER REMOVAL + FORMAT
     # =============================
     coordinates, confidences = kpms.outlier_removal(
         coordinates_dict,
@@ -540,7 +638,7 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     data = convert_data_precision(data)
 
     # =============================
-    # Estimar sigmasq_loc
+    # 5) ESTIMAR sigmasq_loc
     # =============================
     kpms.update_config(
         str(PROJECT_DIR),
@@ -551,67 +649,191 @@ def main_one_run(run_tag: str, model_seed: Optional[int] = None, kappa_full: Opt
     cfg = kpms.load_config(str(PROJECT_DIR))
 
     # =============================
-    # PCA + init
+    # 6) PCA — fit, plot variance, ask user for n_components
     # =============================
+    # Fit PCA with the maximum number of components first so the
+    # variance plot shows the full spectrum before the user decides.
     pca = kpms.fit_pca(data["Y"], data["mask"], **cfg)
-
     try:
         kpms.save_pca(pca, str(PROJECT_DIR))
     except Exception:
         pass
 
-    model = kpms.init_model(data, pca=pca, **cfg)
+    # Show cumulative variance plot and block until user picks n_components
+    n_pcs = plot_pca_variance_and_ask(pca, qa_dir)
 
-    if model_seed is not None:
-        save_json(qa_dir / f"model_seed_{run_tag}.json", {"seed": model_seed})
+    # Re-fit PCA with the chosen number of components and update config
+    pca = kpms.fit_pca(data["Y"], data["mask"], num_pcs=n_pcs, **cfg)
+    try:
+        kpms.save_pca(pca, str(PROJECT_DIR))
+    except Exception:
+        pass
+
+    kpms.update_config(str(PROJECT_DIR), num_pcs=n_pcs)
+    cfg = kpms.load_config(str(PROJECT_DIR))
+
+    save_json(qa_dir / "pca_n_components.json", {"num_pcs": n_pcs})
+    print(f"[PCA] Config updated with num_pcs={n_pcs}.")
 
     # =============================
-    # Fit AR-HMM
+    # 7) KAPPA SCAN
     # =============================
-    model, model_name = kpms.fit_model(
-        model, data, metadata, str(PROJECT_DIR),
-        ar_only=True, num_iters=NUM_AR_ITERS
+    print("\n" + "="*50)
+    print("STAGE 1: KAPPA SCAN")
+    print("="*50)
+
+    for kappa in KAPPA_SCAN_VALUES:
+        print(f"\n[KAPPA SCAN] Fitting model with kappa={kappa:.2e}")
+        model_name = f"{KAPPA_SCAN_PREFIX}-{kappa:.2e}"
+        model = kpms.init_model(data, pca=pca, **cfg)
+
+        # AR-only stage
+        model = kpms.update_hypparams(model, kappa=kappa)
+        model = kpms.fit_model(
+            model, data, metadata, str(PROJECT_DIR), model_name,
+            ar_only=True,
+            num_iters=NUM_AR_ITERS_SCAN,
+            save_every_n_iters=25
+        )[0]
+
+        # Full model stage with reduced kappa
+        model = kpms.update_hypparams(model, kappa=kappa / KAPPA_DECREASE_FACTOR)
+        kpms.fit_model(
+            model, data, metadata, str(PROJECT_DIR), model_name,
+            ar_only=False,
+            start_iter=NUM_AR_ITERS_SCAN,
+            num_iters=NUM_FULL_ITERS_SCAN,
+            save_every_n_iters=25
+        )
+
+    kpms.plot_kappa_scan(KAPPA_SCAN_VALUES, str(PROJECT_DIR), KAPPA_SCAN_PREFIX)
+    print("\n[KAPPA SCAN] Done. Review the kappa scan plot to choose the best kappa.")
+
+    # =============================
+    # 8) MULTI-SEED FITTING
+    # =============================
+    print("\n" + "="*50)
+    print("STAGE 2: MULTI-SEED MODEL FITTING")
+    print("="*50)
+
+    for restart in range(NUM_MODEL_FITS):
+        print(f"\n[MULTI-SEED] Fitting model {restart} / {NUM_MODEL_FITS - 1}")
+        model_name = f"{MULTI_SEED_PREFIX}-{restart}"
+
+        model = kpms.init_model(
+            data, pca=pca, **cfg, seed=jax.random.PRNGKey(restart)
+        )
+
+        # AR-only stage
+        model = kpms.update_hypparams(model, kappa=AR_ONLY_KAPPA)
+        model = kpms.fit_model(
+            model, data, metadata, str(PROJECT_DIR), model_name,
+            ar_only=True,
+            num_iters=NUM_AR_ITERS
+        )[0]
+
+        # Full model stage
+        model = kpms.update_hypparams(model, kappa=FULL_MODEL_KAPPA)
+        kpms.fit_model(
+            model, data, metadata, str(PROJECT_DIR), model_name,
+            ar_only=False,
+            start_iter=NUM_AR_ITERS,
+            num_iters=NUM_FULL_ITERS
+        )
+
+        kpms.reindex_syllables_in_checkpoint(str(PROJECT_DIR), model_name)
+        model, data, metadata, current_iter = kpms.load_checkpoint(
+            str(PROJECT_DIR), model_name
+        )
+        results = kpms.extract_results(model, metadata, str(PROJECT_DIR), model_name)
+
+    # =============================
+    # 9) MODEL SELECTION (EML)
+    # =============================
+    print("\n" + "="*50)
+    print("STAGE 3: MODEL SELECTION VIA EML SCORE")
+    print("="*50)
+
+    model_names = [f"{MULTI_SEED_PREFIX}-{i}" for i in range(NUM_MODEL_FITS)]
+
+    # Pairwise confusion matrix between first two models as a sanity check
+    print("[MODEL SELECTION] Plotting confusion matrix for models 0 vs 1 ...")
+    results_0 = kpms.load_results(str(PROJECT_DIR), model_names[0])
+    results_1 = kpms.load_results(str(PROJECT_DIR), model_names[1])
+    kpms.plot_confusion_matrix(results_0, results_1)
+
+    # EML scores
+    print("[MODEL SELECTION] Computing EML scores ...")
+    eml_scores, eml_std_errs = kpms.expected_marginal_likelihoods(
+        str(PROJECT_DIR), model_names
+    )
+    best_model_name = model_names[np.argmax(eml_scores)]
+    print(f"[MODEL SELECTION] Best model: {best_model_name}")
+
+    kpms.plot_eml_scores(eml_scores, eml_std_errs, model_names)
+
+    save_json(qa_dir / "model_selection.json", {
+        "best_model": best_model_name,
+        "model_names": model_names,
+        "eml_scores": list(float(s) for s in eml_scores),
+        "eml_std_errs": list(float(s) for s in eml_std_errs),
+    })
+
+    # =============================
+    # 10) RESULTADOS FINALES + PLOTS
+    # =============================
+    print("\n" + "="*50)
+    print("STAGE 4: EXTRACTING RESULTS FOR BEST MODEL")
+    print("="*50)
+
+    model, data, metadata, _ = kpms.load_checkpoint(str(PROJECT_DIR), best_model_name)
+    results = kpms.extract_results(model, metadata, str(PROJECT_DIR), best_model_name)
+    kpms.save_results_as_csv(results, str(PROJECT_DIR), best_model_name)
+
+    results = kpms.load_results(str(PROJECT_DIR), best_model_name)
+    kpms.generate_trajectory_plots(
+        coordinates, results, str(PROJECT_DIR), best_model_name, **cfg
     )
 
     # =============================
-    # Fit full model
+    # 11) MERGING SIMILAR SYLLABLES (opcional)
     # =============================
-    model, data, metadata, current_iter = kpms.load_checkpoint(
-        str(PROJECT_DIR), model_name, iteration=NUM_AR_ITERS
-    )
+    if SYLLABLES_TO_MERGE:
+        print("\n" + "="*50)
+        print("STAGE 5: MERGING SIMILAR SYLLABLES")
+        print("="*50)
+        print(f"[MERGE] Groups to merge: {SYLLABLES_TO_MERGE}")
 
-    kappa_use = float(kappa_full) if kappa_full is not None else 1e4
-    model = kpms.update_hypparams(model, kappa=kappa_use)
-    save_json(qa_dir / f"kappa_{run_tag}.json", {"kappa_full": kappa_use})
+        results_path = os.path.join(
+            str(PROJECT_DIR), best_model_name, "results.h5"
+        )
+        results_raw = kpms.load_hdf5(results_path)
 
-    model = kpms.fit_model(
-        model, data, metadata, str(PROJECT_DIR),
-        model_name=model_name,
-        ar_only=False,
-        start_iter=current_iter,
-        num_iters=current_iter + NUM_FULL_ITERS,
-    )[0]
+        syllable_mapping = kpms.generate_syllable_mapping(
+            results_raw, SYLLABLES_TO_MERGE
+        )
+        new_results = kpms.apply_syllable_mapping(results_raw, syllable_mapping)
 
-    kpms.reindex_syllables_in_checkpoint(str(PROJECT_DIR), model_name)
-    model, data, metadata, _ = kpms.load_checkpoint(str(PROJECT_DIR), model_name)
+        new_results_path = os.path.join(
+            str(PROJECT_DIR), best_model_name, "results_merged.h5"
+        )
+        kpms.save_hdf5(new_results_path, new_results)
+        print(f"[MERGE] Merged results saved to: {new_results_path}")
 
-    results = kpms.extract_results(model, metadata, str(PROJECT_DIR), model_name)
-    kpms.save_results_as_csv(results, str(PROJECT_DIR), model_name)
+        output_dir = os.path.join(
+            str(PROJECT_DIR), best_model_name, "trajectory_plots_merged"
+        )
+        kpms.generate_trajectory_plots(
+            coordinates, new_results, output_dir=output_dir, **cfg
+        )
+        print(f"[MERGE] Trajectory plots saved to: {output_dir}")
+    else:
+        print("\n[MERGE] SYLLABLES_TO_MERGE is empty — skipping merge step.")
+        print("        Set SYLLABLES_TO_MERGE in the config section to enable this.")
 
-    results = kpms.load_results(str(PROJECT_DIR), model_name)
-    kpms.generate_trajectory_plots(coordinates, results, str(PROJECT_DIR), model_name, **cfg)
+    print("\nDONE. Best model:", (PROJECT_DIR / best_model_name).resolve())
+    return best_model_name
 
-    print("DONE:", (PROJECT_DIR / model_name).resolve())
-    return model_name
-
-
-def main():
-    run_tag = "default"
-    main_one_run(
-        run_tag=run_tag,
-        model_seed=None,
-        kappa_full=None
-    )
 
 if __name__ == "__main__":
     main()
