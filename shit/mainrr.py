@@ -48,7 +48,7 @@ def male_track_index_from_stem_strict(stem: str) -> tuple[int, str]:
 # CONFIG AJUSTABLE
 # =============================
 FPS = 30
-DATA_ROOT = Path("data/h5")
+DATA_ROOT = Path("../data/h5")
 PROJECT_DIR = Path("kpms_project")
 
 N_RANDOM_VIDEOS = 26
