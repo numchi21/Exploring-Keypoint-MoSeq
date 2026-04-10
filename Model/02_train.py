@@ -19,7 +19,7 @@ from __future__ import annotations
 import jax
 import keypoint_moseq as kpms
 
-from config import (
+from Model.config import (
     PROJECT_DIR,
     MULTI_SEED_PREFIX, NUM_MODEL_FITS,
     AR_ONLY_KAPPA, FULL_MODEL_KAPPA,

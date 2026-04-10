@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import keypoint_moseq as kpms
 
-from config import (
+from Model.config import (
     PROJECT_DIR,
     load_json,
     load_and_preprocess, build_kpms_data,

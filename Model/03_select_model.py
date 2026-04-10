@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import keypoint_moseq as kpms
 
-from config import (
+from Model.config import (
     PROJECT_DIR,
     MULTI_SEED_PREFIX, NUM_MODEL_FITS,
     ensure_dir, save_json,

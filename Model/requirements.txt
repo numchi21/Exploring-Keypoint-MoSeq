@@ -1,0 +1,5 @@
+keypoint-moseq
+jax[cuda12]
+numpy
+h5py
+matplotlib

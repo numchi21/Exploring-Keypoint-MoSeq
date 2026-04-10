@@ -21,7 +21,7 @@ from typing import Optional, Dict, List, Tuple
 # =============================================================================
 # PATHS
 # =============================================================================
-DATA_ROOT   = Path("data/h5")
+DATA_ROOT   = Path("../data/h5")
 PROJECT_DIR = Path("kpms_project")
 
 # =============================================================================
@@ -70,7 +70,7 @@ KAPPA_SCAN_PREFIX     = "kappa_scan"
 KAPPA_SCAN_VALUES     = np.logspace(3, 7, 5)   # [1e3, ~3e4, 1e5, ~3e5, 1e7]
 KAPPA_DECREASE_FACTOR = 10
 NUM_AR_ITERS_SCAN     = 50
-NUM_FULL_ITERS_SCAN   = 200
+NUM_FULL_ITERS_SCAN   = 500
 
 # =============================================================================
 # MALE TRACK ASSIGNMENT

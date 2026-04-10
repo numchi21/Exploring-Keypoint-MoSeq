@@ -11,19 +11,6 @@ After running this script you will know:
   - Which kappa to use   (inspect kappa_scan plot, then set FULL_MODEL_KAPPA
                           in config.py before running 02_train.py)
 """
-"""
-01_explore.py — Run ONCE before training.
-
-Steps:
-  1. Load & preprocess data.
-  2. Fit PCA on full spectrum → variance plot → ask user for num_pcs.
-  3. Run kappa scan → plot results.
-
-After this script you will know:
-  - num_pcs  → already written to config.yml automatically
-  - kappa    → inspect kappa scan plot, then update FULL_MODEL_KAPPA
-               in config.py before running 02_train.py
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -33,7 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from config import (
+from Model.config import (
     PROJECT_DIR,
     KAPPA_SCAN_PREFIX, KAPPA_SCAN_VALUES,
     KAPPA_DECREASE_FACTOR, NUM_AR_ITERS_SCAN, NUM_FULL_ITERS_SCAN,
@@ -174,8 +161,8 @@ def main():
     metadata_orig = metadata
 
     for kappa in KAPPA_SCAN_VALUES:
-        print(f"\n[KAPPA SCAN] kappa={kappa:.2e}")
-        model_name = f"{KAPPA_SCAN_PREFIX}-{kappa:.2e}"
+        print(f"\n[KAPPA SCAN] kappa={float(kappa)}")
+        model_name = f"{KAPPA_SCAN_PREFIX}-{float(kappa)}"
         model      = kpms.init_model(data_orig, pca=pca, **cfg)
 
         model = kpms.update_hypparams(model, kappa=kappa)
